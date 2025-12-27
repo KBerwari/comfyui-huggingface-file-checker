@@ -98,7 +98,9 @@ python src/main.py --hf-repo "user/private-repo" --local-dir "path/to/your/metad
 --repo-type        Force repo type: model, dataset, space when using --hf-repo
 --local-dir        Where your files are (required)
 --safetensors-only Only check .safetensors files
+--filter           Only check HF files matching a pattern (see below)
 --export-missing   Save missing files list to a file
+--export-urls      Save download URLs only (one per line, for aria2c/wget)
 --export-matches   Save matched files list  
 --export-all       Dump everything to a directory
 --no-cache         Skip the cache (slower but fresh)
@@ -108,7 +110,20 @@ python src/main.py --hf-repo "user/private-repo" --local-dir "path/to/your/metad
 -v, --verbose      Show all matches, not just summary
 
 --scan-files       Hash model files instead of reading metadata JSONs 
-(VERY SLOW, NOT RECOMMENDED, prefer metadata mode by using ComfyUI-Lora-Manager)
+(slower, but works without metadata. Shows progress bar when hashing)
+```
+
+### Filter Patterns
+
+The `--filter` option uses wildcard patterns:
+- `*` matches any characters (zero or more)
+- `?` matches exactly one character
+
+Examples:
+```bash
+--filter "*wan22*"     # contains "wan22" anywhere
+--filter "wan22*"      # starts with "wan22"
+--filter "*-v2.safetensors"  # ends with "-v2.safetensors"
 ```
 
 ## Expected Metadata JSON Format

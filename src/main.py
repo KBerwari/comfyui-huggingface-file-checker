@@ -11,10 +11,11 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import click
+import fnmatch
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
 from rich import print as rprint
 
 from hf_client import HuggingFaceClient
@@ -246,6 +247,7 @@ def export_all(summary: ComparisonSummary, output_dir: str):
 @click.option('--local-dir', required=True, help='Path to directory containing metadata JSON files or model files')
 @click.option('--scan-files', is_flag=True, help='Scan actual model files and calculate SHA256 (slow, but works without metadata files)')
 @click.option('--safetensors-only', is_flag=True, help='Only check .safetensors files')
+@click.option('--filter', 'filter_pattern', help='Only check HF files matching this pattern (e.g., "*wan22*" or "*.safetensors")')
 @click.option('--verbose', '-v', is_flag=True, help='Show all matched files')
 @click.option('--export-missing', 'export_file', help='Export missing files list to a file')
 @click.option('--export-urls', 'export_urls_file', help='Export just the download URLs for missing files (one per line, for wget/aria2c)')
@@ -256,7 +258,7 @@ def export_all(summary: ComparisonSummary, output_dir: str):
 @click.option('--branch', default='main', help='Repository branch to check (default: main)')
 @click.option('--no-cache', is_flag=True, help='Disable caching (rescan all files every time)')
 @click.option('--clear-cache', is_flag=True, help='Clear the cache before scanning')
-def main(hf_url, hf_repo, repo_type, local_dir, scan_files, safetensors_only, verbose, export_file, export_urls_file, export_matches_file, export_mismatches_file, export_all_dir, token, branch, no_cache, clear_cache):
+def main(hf_url, hf_repo, repo_type, local_dir, scan_files, safetensors_only, filter_pattern, verbose, export_file, export_urls_file, export_matches_file, export_mismatches_file, export_all_dir, token, branch, no_cache, clear_cache):
     """
     Check if you have files from a HuggingFace repository by comparing SHA256 hashes.
     
@@ -313,6 +315,12 @@ def main(hf_url, hf_repo, repo_type, local_dir, scan_files, safetensors_only, ve
             else:
                 hf_files = hf_client.fetch_all_files()
                 console.print(f"[green]✓[/green] Found [cyan]{len(hf_files)}[/cyan] files on HuggingFace")
+            
+            # Apply filter if specified
+            if filter_pattern:
+                original_count = len(hf_files)
+                hf_files = [f for f in hf_files if fnmatch.fnmatch(f.path.lower(), filter_pattern.lower())]
+                console.print(f"[green]✓[/green] Filter [cyan]{filter_pattern}[/cyan]: {len(hf_files)}/{original_count} files match")
         except Exception as e:
             console.print(f"[red]Error fetching HuggingFace files: {e}[/red]")
             sys.exit(1)
@@ -320,7 +328,7 @@ def main(hf_url, hf_repo, repo_type, local_dir, scan_files, safetensors_only, ve
         # Scan local files
         if scan_files:
             # Direct file scanning mode - hash actual model files
-            progress.update(task, description="Scanning model files (this may take a while)...")
+            progress.update(task, description="Finding model files...")
             try:
                 scanner = DirectScanner(local_dir, use_cache=not no_cache)
                 
@@ -330,16 +338,20 @@ def main(hf_url, hf_repo, repo_type, local_dir, scan_files, safetensors_only, ve
                 # Determine extensions to scan
                 extensions = ['.safetensors'] if safetensors_only else ['.safetensors', '.ckpt', '.pt', '.bin']
                 
-                # Progress callback for hashing
-                def hash_progress(filename, current, total):
-                    progress.update(task, description=f"Hashing files... ({current}/{total}) {filename[:30]}...")
-                
-                local_files = scanner.scan(extensions=extensions, progress_callback=hash_progress)
+                local_files = scanner.scan(extensions=extensions)
                 
                 stats = scanner.stats
-                cache_info = ""
+                
+                # Show clear cache status
                 if not no_cache and stats['cache_hits'] > 0:
-                    cache_info = f" [dim](cache: {scanner.cache_hit_rate:.0f}% hit rate)[/dim]"
+                    if stats['cache_misses'] == 0:
+                        cache_info = f" [dim](all {stats['cache_hits']} loaded from cache)[/dim]"
+                    else:
+                        cache_info = f" [dim](cache: {scanner.cache_hit_rate:.0f}% hit, {stats['cache_misses']} newly hashed)[/dim]"
+                elif stats['cache_misses'] > 0:
+                    cache_info = f" [dim]({stats['cache_misses']} files hashed)[/dim]"
+                else:
+                    cache_info = ""
                 
                 console.print(f"[green]✓[/green] Scanned [cyan]{scanner.file_count}[/cyan] model files{cache_info}")
             except Exception as e:
@@ -418,7 +430,10 @@ def main(hf_url, hf_repo, repo_type, local_dir, scan_files, safetensors_only, ve
     
     # Exit code based on results
     if summary.missing_local_count > 0:
-        console.print(f"\n[yellow]You are missing {summary.missing_local_count} files from the HuggingFace repository.[/yellow]")
+        msg = f"You are missing {summary.missing_local_count} files from the HuggingFace repository."
+        if summary.mismatch_count > 0:
+            msg += f" Also, {summary.mismatch_count} files have different SHA256."
+        console.print(f"\n[yellow]{msg}[/yellow]")
         sys.exit(2)
     elif summary.mismatch_count > 0:
         console.print(f"\n[yellow]{summary.mismatch_count} files have different SHA256 (possibly different versions).[/yellow]")

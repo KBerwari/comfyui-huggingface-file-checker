@@ -14,6 +14,7 @@ from typing import List, Optional, Dict, Any, Tuple, Callable
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime
+from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, TaskProgressColumn, SpinnerColumn
 
 from models import LocalFileInfo
 
@@ -358,7 +359,7 @@ class DirectScanner:
     """
     
     CACHE_FILENAME = ".hf_checker_direct_cache.pkl"
-    CACHE_VERSION = 1
+    CACHE_VERSION = 2  # Must match MetadataCache.version default
     
     def __init__(self, directory: str, use_cache: bool = True):
         self.directory = Path(directory)
@@ -382,7 +383,8 @@ class DirectScanner:
         self, 
         extensions: Optional[List[str]] = None, 
         force_rescan: bool = False,
-        progress_callback: Optional[Callable[[str, int, int], None]] = None
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
+        show_progress: bool = True
     ) -> List[LocalFileInfo]:
         """
         Scan directory for model files and calculate their SHA256 hashes.
@@ -391,6 +393,7 @@ class DirectScanner:
             extensions: File extensions to scan (default: ['.safetensors', '.ckpt', '.pt'])
             force_rescan: Ignore cache and rehash everything
             progress_callback: Optional callback(filename, current, total) for progress updates
+            show_progress: Show rich progress bar (default: True)
         """
         if extensions is None:
             extensions = ['.safetensors', '.ckpt', '.pt', '.bin']
@@ -416,14 +419,58 @@ class DirectScanner:
         
         self._stats['files_scanned'] = len(self._model_files)
         
-        # Hash each file (using cache when possible)
-        for i, model_path in enumerate(self._model_files):
-            if progress_callback:
-                progress_callback(model_path.name, i + 1, len(self._model_files))
-            
-            file_info = self._get_file_info_cached(model_path)
-            if file_info:
-                self._local_files.append(file_info)
+        # Check how many will need hashing (not in cache)
+        files_to_hash = []
+        for model_path in self._model_files:
+            path_str = str(model_path)
+            try:
+                stat = model_path.stat()
+                if self._cache and path_str in self._cache.entries:
+                    entry = self._cache.entries[path_str]
+                    if entry.mtime == stat.st_mtime and entry.size == stat.st_size:
+                        continue  # Will be a cache hit
+            except OSError:
+                continue
+            files_to_hash.append(model_path)
+        
+        # Hash files with progress bar if there are files to hash
+        if show_progress and files_to_hash:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                TextColumn("•"),
+                TimeRemainingColumn(),
+            ) as progress:
+                task = progress.add_task(
+                    f"[cyan]Hashing {len(files_to_hash)} files...", 
+                    total=len(files_to_hash)
+                )
+                
+                hash_count = 0
+                for i, model_path in enumerate(self._model_files):
+                    file_info = self._get_file_info_cached(model_path)
+                    if file_info:
+                        self._local_files.append(file_info)
+                    
+                    # Update progress only for files that needed hashing
+                    if model_path in files_to_hash:
+                        hash_count += 1
+                        progress.update(
+                            task, 
+                            completed=hash_count,
+                            description=f"[cyan]Hashing: {model_path.name[:40]}..."
+                        )
+        else:
+            # No progress bar needed (all cached or progress disabled)
+            for i, model_path in enumerate(self._model_files):
+                if progress_callback:
+                    progress_callback(model_path.name, i + 1, len(self._model_files))
+                
+                file_info = self._get_file_info_cached(model_path)
+                if file_info:
+                    self._local_files.append(file_info)
         
         # Cleanup and save cache
         self._cleanup_cache()
