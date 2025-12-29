@@ -26,6 +26,31 @@ from models import MatchStatus, ComparisonSummary
 
 console = Console()
 
+# CLI Group
+
+@click.group(invoke_without_command=True)
+@click.pass_context
+def cli(ctx):
+    """
+    HuggingFace File Checker - Compare local files against HuggingFace repos.
+    
+    \b
+    Commands:
+      check   - Compare local files against a HuggingFace repository
+      server  - Run API server for browser extension
+      config  - Manage configuration (directories, etc.)
+    
+    \b
+    Quick start:
+      python main.py check --hf-repo "user/repo" --local-dir "./models"
+      python main.py server --add-dir "./models"
+    """
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+
+
+# Helper Functions
+
 
 def print_summary(summary: ComparisonSummary):
     """Print a formatted summary of the comparison."""
@@ -240,7 +265,9 @@ def export_all(summary: ComparisonSummary, output_dir: str):
     console.print(f"[green]Exported all results to: {output_dir}/[/green]")
 
 
-@click.command()
+# CHECK Command (main comparison functionality)
+
+@cli.command()
 @click.option('--hf-url', help='HuggingFace repository URL (e.g., https://huggingface.co/K3NK/loras-WAN/tree/main or https://huggingface.co/datasets/user/repo)')
 @click.option('--hf-repo', help='HuggingFace repository ID (e.g., K3NK/loras-WAN)')
 @click.option('--repo-type', type=click.Choice(['model', 'dataset', 'space']), default='model', help='Repository type (default: model). Auto-detected from URL if using --hf-url')
@@ -258,7 +285,7 @@ def export_all(summary: ComparisonSummary, output_dir: str):
 @click.option('--branch', default='main', help='Repository branch to check (default: main)')
 @click.option('--no-cache', is_flag=True, help='Disable caching (rescan all files every time)')
 @click.option('--clear-cache', is_flag=True, help='Clear the cache before scanning')
-def main(hf_url, hf_repo, repo_type, local_dir, scan_files, safetensors_only, filter_pattern, verbose, export_file, export_urls_file, export_matches_file, export_mismatches_file, export_all_dir, token, branch, no_cache, clear_cache):
+def check(hf_url, hf_repo, repo_type, local_dir, scan_files, safetensors_only, filter_pattern, verbose, export_file, export_urls_file, export_matches_file, export_mismatches_file, export_all_dir, token, branch, no_cache, clear_cache):
     """
     Check if you have files from a HuggingFace repository by comparing SHA256 hashes.
     
@@ -443,5 +470,116 @@ def main(hf_url, hf_repo, repo_type, local_dir, scan_files, safetensors_only, fi
         sys.exit(0)
 
 
+
+# SERVER Command
+
+@cli.command()
+@click.option('--port', default=7860, help='Port to run server on (default: 7860)')
+@click.option('--host', default='127.0.0.1', help='Host to bind to (default: 127.0.0.1)')
+@click.option('--add-dir', multiple=True, help='Add directory to scan (can be used multiple times)')
+@click.option('--no-scan', is_flag=True, help='Start server without initial scan')
+def server(port, host, add_dir, no_scan):
+    """
+    Run API server for browser extension integration.
+    
+    The server provides a local API that the Tampermonkey script can query
+    to check if you have files from HuggingFace repositories.
+    
+    \b
+    Examples:
+        python main.py server
+        python main.py server --port 8080
+        python main.py server --add-dir "H:/AI/models" --add-dir "D:/loras"
+    """
+    from config import get_config_manager
+    from server import run_server
+    
+    # Add any directories specified on command line
+    if add_dir:
+        config_manager = get_config_manager()
+        for directory in add_dir:
+            if os.path.isdir(directory):
+                config_manager.add_directory(directory)
+                console.print(f"[green]✓[/green] Added directory: {directory}")
+            else:
+                console.print(f"[yellow]Warning: Directory does not exist: {directory}[/yellow]")
+    
+    # Run the server
+    run_server(host=host, port=port, auto_scan=not no_scan)
+
+
+
+# CONFIG Command
+
+@cli.command()
+@click.option('--list', 'list_dirs', is_flag=True, help='List all configured directories')
+@click.option('--add', 'add_dir', help='Add a directory')
+@click.option('--remove', 'remove_dir', help='Remove a directory')
+@click.option('--mode', type=click.Choice(['files', 'metadata']), default='metadata', help='Scan mode: "metadata" (read JSON metadata, fast) or "files" (hash model files directly, slow)')
+@click.option('--show-path', is_flag=True, help='Show config file path')
+def config(list_dirs, add_dir, remove_dir, mode, show_path):
+    """
+    Manage configuration (directories, settings).
+    
+    \b
+    Scan modes:
+      metadata - Read SHA256 from JSON metadata files (fast, needs ComfyUI-Lora-Manager)
+      files    - Hash actual model files (slower first run, but works without metadata)
+    
+    \b
+    Examples:
+        python main.py config --list
+        python main.py config --add "H:/AI/models"
+        python main.py config --add "H:/AI/loras" --mode files
+        python main.py config --remove "H:/AI/models"
+    """
+    from config import get_config_manager
+    
+    config_manager = get_config_manager()
+    
+    if show_path:
+        console.print(f"Config file: {config_manager.config_path}")
+        return
+    
+    if add_dir:
+        if os.path.isdir(add_dir):
+            dir_config = config_manager.add_directory(add_dir, scan_mode=mode)
+            console.print(f"[green]✓[/green] Added: {dir_config.name} ({dir_config.path})")
+            console.print(f"  Scan mode: [cyan]{mode}[/cyan]")
+        else:
+            console.print(f"[red]Error: Directory does not exist: {add_dir}[/red]")
+            sys.exit(1)
+        return
+    
+    if remove_dir:
+        if config_manager.remove_directory(remove_dir):
+            console.print(f"[green]✓[/green] Removed: {remove_dir}")
+        else:
+            console.print(f"[yellow]Directory not found in config: {remove_dir}[/yellow]")
+        return
+    
+    # Default: list directories
+    dirs = config_manager.config.directories
+    if not dirs:
+        console.print("[dim]No directories configured.[/dim]")
+        console.print("Add one with: python main.py config --add \"path/to/models\"")
+        return
+    
+    table = Table(title="Configured Directories")
+    table.add_column("Name", style="cyan")
+    table.add_column("Path", style="dim")
+    table.add_column("Mode", style="green")
+    table.add_column("Enabled", style="yellow")
+    
+    for d in dirs:
+        table.add_row(
+            d.name,
+            d.path,
+            d.scan_mode,
+            "✓" if d.enabled else "✗"
+        )
+    
+    console.print(table)
+
 if __name__ == "__main__":
-    main()
+    cli()
