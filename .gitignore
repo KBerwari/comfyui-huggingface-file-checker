@@ -8,6 +8,8 @@ __pycache__/
 # Cache files
 .hf_checker_cache.pkl
 .hf_checker_direct_cache.pkl
+.hf_checker_cache.sqlite
+.hf_checker_cache_direct.sqlite
 
 # Results folder (user-generated output)
 results/

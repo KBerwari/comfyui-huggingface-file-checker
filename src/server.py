@@ -82,14 +82,16 @@ def rebuild_cache():
     global _hash_cache
     
     config_manager = get_config_manager()
+    config = config_manager.config
     directories = config_manager.get_enabled_directories()
-    
-    if not directories:
-        print("No directories configured. Add one with: python main.py config --add \"path\"")
-        return
     
     _hash_cache = HashCache()
     _hash_cache.last_scan = datetime.now().isoformat()
+    
+    if not directories:
+        print("No directories configured.")
+        print("Add a directory with: python main.py config --add \"path\"")
+        return
     
     print(f"\nScanning {len(directories)} directory(s)...\n")
     
@@ -390,6 +392,9 @@ def remove_directory():
     
     return jsonify({'error': 'Directory not found in config'}), 404
 
+
+
+# API Endpoints
 
 @app.route('/api/rescan', methods=['POST'])
 def rescan():

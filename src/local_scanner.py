@@ -9,7 +9,7 @@ Can also scan actual model files directly and calculate their SHA256 hashes
 import os
 import json
 import hashlib
-import pickle
+import sqlite3
 from typing import List, Optional, Dict, Any, Tuple, Callable
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -19,28 +19,129 @@ from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, 
 from models import LocalFileInfo
 
 
-@dataclass
-class CacheEntry:
-    """Cache entry for a single metadata file"""
-    mtime: float  # File modification time
-    size: int  # File size
-    file_info: Optional[LocalFileInfo]  # Parsed info (None if parsing failed)
-
-
-@dataclass
-class MetadataCache:
-    """Cache for all scanned metadata files"""
-    version: int = 2  # Bump this to invalidate old caches
-    directory: str = ""
-    created: str = ""
-    entries: Dict[str, CacheEntry] = field(default_factory=dict)  # path -> CacheEntry
+# SQLite-based cache
+class SQLiteMetadataCache:
+    """SQLite-based cache for file metadata."""
+    
+    SCHEMA_VERSION = 1
+    
+    def __init__(self, cache_path: Path, directory: str):
+        self.cache_path = cache_path
+        self.directory = directory
+        self._ensure_schema()
+    
+    def _ensure_schema(self):
+        """Create tables if they don't exist."""
+        with sqlite3.connect(str(self.cache_path)) as conn:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS cache_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                );
+                
+                CREATE TABLE IF NOT EXISTS file_cache (
+                    file_path TEXT PRIMARY KEY,
+                    mtime REAL NOT NULL,
+                    size INTEGER NOT NULL,
+                    file_name TEXT,
+                    sha256 TEXT,
+                    model_name TEXT,
+                    base_model TEXT,
+                    actual_file_path TEXT,
+                    metadata_path TEXT,
+                    file_size INTEGER
+                );
+                
+                CREATE INDEX IF NOT EXISTS idx_sha256 ON file_cache(sha256);
+            """)
+            conn.execute("INSERT OR REPLACE INTO cache_meta (key, value) VALUES ('directory', ?)", (self.directory,))
+            conn.execute("INSERT OR REPLACE INTO cache_meta (key, value) VALUES ('version', ?)", (str(self.SCHEMA_VERSION),))
+            conn.commit()
+    
+    def is_valid_for_directory(self, directory: str) -> bool:
+        """Check if cache is valid for the given directory."""
+        try:
+            with sqlite3.connect(str(self.cache_path)) as conn:
+                cursor = conn.execute("SELECT value FROM cache_meta WHERE key = 'directory'")
+                row = cursor.fetchone()
+                return row and row[0] == directory
+        except:
+            return False
+    
+    def get_entry(self, file_path: str) -> Optional[Tuple[float, int, Optional[LocalFileInfo]]]:
+        """Get cached entry for a file path."""
+        try:
+            with sqlite3.connect(str(self.cache_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute("SELECT * FROM file_cache WHERE file_path = ?", (file_path,))
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                
+                file_info = None
+                if row['file_name'] or row['sha256']:
+                    file_info = LocalFileInfo(
+                        file_name=row['file_name'] or '',
+                        sha256=row['sha256'],
+                        file_path=row['actual_file_path'],
+                        size=row['file_size'],
+                        model_name=row['model_name'],
+                        base_model=row['base_model'],
+                        metadata_path=row['metadata_path'] or ''
+                    )
+                return (row['mtime'], row['size'], file_info)
+        except:
+            return None
+    
+    def set_entry(self, file_path: str, mtime: float, size: int, file_info: Optional[LocalFileInfo]):
+        """Store or update a cache entry."""
+        try:
+            with sqlite3.connect(str(self.cache_path)) as conn:
+                conn.execute("""
+                    INSERT OR REPLACE INTO file_cache 
+                    (file_path, mtime, size, file_name, sha256, model_name, base_model, actual_file_path, metadata_path, file_size)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    file_path, mtime, size,
+                    file_info.file_name if file_info else None,
+                    file_info.sha256 if file_info else None,
+                    file_info.model_name if file_info else None,
+                    file_info.base_model if file_info else None,
+                    file_info.file_path if file_info else None,
+                    file_info.metadata_path if file_info else None,
+                    file_info.size if file_info else None,
+                ))
+                conn.commit()
+        except:
+            pass
+    
+    def cleanup_stale(self, valid_paths: set):
+        """Remove entries for files that no longer exist."""
+        try:
+            with sqlite3.connect(str(self.cache_path)) as conn:
+                cursor = conn.execute("SELECT file_path FROM file_cache")
+                all_paths = [row[0] for row in cursor.fetchall()]
+                stale = [p for p in all_paths if p not in valid_paths]
+                if stale:
+                    conn.executemany("DELETE FROM file_cache WHERE file_path = ?", [(p,) for p in stale])
+                    conn.commit()
+        except:
+            pass
+    
+    def clear(self):
+        """Clear all cache entries."""
+        try:
+            with sqlite3.connect(str(self.cache_path)) as conn:
+                conn.execute("DELETE FROM file_cache")
+                conn.commit()
+        except:
+            pass
 
 
 class LocalScanner:
     """Scanner for local metadata JSON files with caching support"""
     
-    CACHE_FILENAME = ".hf_checker_cache.pkl"
-    CACHE_VERSION = 2
+    CACHE_FILENAME = ".hf_checker_cache.sqlite"
     
     def __init__(self, directory: str, use_cache: bool = True):
         """
@@ -57,7 +158,7 @@ class LocalScanner:
         self.use_cache = use_cache
         self._metadata_files: List[Path] = []
         self._local_files: List[LocalFileInfo] = []
-        self._cache: Optional[MetadataCache] = None
+        self._cache: Optional[SQLiteMetadataCache] = None
         self._cache_path = self.directory / self.CACHE_FILENAME
         
         # Stats
@@ -87,17 +188,27 @@ class LocalScanner:
         self._local_files = []
         self._stats = {'cache_hits': 0, 'cache_misses': 0, 'files_scanned': 0, 'parse_errors': 0}
         
-        # Load cache if enabled
+        # Load/create cache if enabled
         if self.use_cache and not force_rescan:
-            self._cache = self._load_cache()
+            self._cache = SQLiteMetadataCache(self._cache_path, str(self.directory))
+            if not self._cache.is_valid_for_directory(str(self.directory)):
+                self._cache.clear()
+        elif self.use_cache:
+            self._cache = SQLiteMetadataCache(self._cache_path, str(self.directory))
+            self._cache.clear()
         else:
-            self._cache = MetadataCache(
-                directory=str(self.directory),
-                created=datetime.now().isoformat()
-            )
+            self._cache = None
         
         # Find all JSON files
-        for root, _, files in os.walk(self.directory):
+        visited_dirs = set()
+        for root, dirs, files in os.walk(self.directory, followlinks=True):
+            
+            real_root = os.path.realpath(root)
+            if real_root in visited_dirs:
+                dirs[:] = []  
+                continue
+            visited_dirs.add(real_root)
+            
             for file in files:
                 if any(file.lower().endswith(ext) for ext in extensions):
                     self._metadata_files.append(Path(root) / file)
@@ -113,10 +224,6 @@ class LocalScanner:
         # Clean up cache (remove entries for deleted files)
         self._cleanup_cache()
         
-        # Save updated cache
-        if self.use_cache:
-            self._save_cache()
-        
         return self._local_files
     
     def _get_file_info_cached(self, path: Path) -> Optional[LocalFileInfo]:
@@ -131,12 +238,14 @@ class LocalScanner:
             return None
         
         # Check cache
-        if self._cache and path_str in self._cache.entries:
-            entry = self._cache.entries[path_str]
-            # Cache hit if mtime and size match
-            if entry.mtime == current_mtime and entry.size == current_size:
-                self._stats['cache_hits'] += 1
-                return entry.file_info
+        if self._cache:
+            cached = self._cache.get_entry(path_str)
+            if cached:
+                cached_mtime, cached_size, cached_info = cached
+                
+                if cached_mtime == current_mtime and cached_size == current_size:
+                    self._stats['cache_hits'] += 1
+                    return cached_info
         
         # Cache miss - need to parse
         self._stats['cache_misses'] += 1
@@ -144,28 +253,12 @@ class LocalScanner:
         
         # Store in cache
         if self._cache:
-            self._cache.entries[path_str] = CacheEntry(
-                mtime=current_mtime,
-                size=current_size,
-                file_info=file_info
-            )
+            self._cache.set_entry(path_str, current_mtime, current_size, file_info)
         
         return file_info
     
     def _parse_metadata_file(self, path: Path) -> Optional[LocalFileInfo]:
-        """
-        Parse a single metadata JSON file.
-        
-        Expected JSON structure (from your example):
-        {
-            "file_name": "...",
-            "model_name": "...",
-            "file_path": "...",
-            "size": 123456,
-            "sha256": "abcd1234...",
-            ...
-        }
-        """
+        """Parse a single metadata JSON file."""
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -210,53 +303,12 @@ class LocalScanner:
             self._stats['parse_errors'] += 1
             return None
     
-    def _load_cache(self) -> Optional[MetadataCache]:
-        """Load cache from disk."""
-        try:
-            if self._cache_path.exists():
-                with open(self._cache_path, 'rb') as f:
-                    cache = pickle.load(f)
-                
-                # Validate cache
-                if isinstance(cache, MetadataCache) and cache.version == self.CACHE_VERSION:
-                    if cache.directory == str(self.directory):
-                        return cache
-                
-                # Cache is invalid or outdated
-                return MetadataCache(
-                    directory=str(self.directory),
-                    created=datetime.now().isoformat()
-                )
-        except Exception:
-            pass
-        
-        return MetadataCache(
-            directory=str(self.directory),
-            created=datetime.now().isoformat()
-        )
-    
-    def _save_cache(self):
-        """Save cache to disk."""
-        if not self._cache:
-            return
-        
-        try:
-            with open(self._cache_path, 'wb') as f:
-                pickle.dump(self._cache, f)
-        except Exception as e:
-            # Silently fail - caching is optional
-            pass
-    
     def _cleanup_cache(self):
         """Remove cache entries for files that no longer exist."""
         if not self._cache:
             return
-        
         existing_paths = {str(p) for p in self._metadata_files}
-        stale_entries = [p for p in self._cache.entries if p not in existing_paths]
-        
-        for path in stale_entries:
-            del self._cache.entries[path]
+        self._cache.cleanup_stale(existing_paths)
     
     def clear_cache(self):
         """Delete the cache file."""
@@ -354,12 +406,10 @@ class DirectScanner:
     Scans actual model files directly and calculates SHA256 hashes.
     Use this when you don't have metadata JSON files.
     
-    Warning: Hashing large files is slow (~30s for a 6GB file).
     Results are cached to speed up subsequent runs.
     """
     
-    CACHE_FILENAME = ".hf_checker_direct_cache.pkl"
-    CACHE_VERSION = 2  # Must match MetadataCache.version default
+    CACHE_FILENAME = ".hf_checker_direct_cache.sqlite"
     
     def __init__(self, directory: str, use_cache: bool = True):
         self.directory = Path(directory)
@@ -369,7 +419,7 @@ class DirectScanner:
         self.use_cache = use_cache
         self._model_files: List[Path] = []
         self._local_files: List[LocalFileInfo] = []
-        self._cache: Optional[MetadataCache] = None
+        self._sqlite_cache: Optional[SQLiteMetadataCache] = None
         self._cache_path = self.directory / self.CACHE_FILENAME
         
         self._stats = {
@@ -402,17 +452,25 @@ class DirectScanner:
         self._local_files = []
         self._stats = {'cache_hits': 0, 'cache_misses': 0, 'files_scanned': 0, 'hash_errors': 0}
         
-        # Load cache
+        # Initialize SQLite cache
         if self.use_cache and not force_rescan:
-            self._cache = self._load_cache()
+            self._sqlite_cache = SQLiteMetadataCache(self._cache_path, str(self.directory))
         else:
-            self._cache = MetadataCache(
-                directory=str(self.directory),
-                created=datetime.now().isoformat()
-            )
+            # Clear existing cache if force_rescan
+            if force_rescan and self._cache_path.exists():
+                self._cache_path.unlink()
+            self._sqlite_cache = SQLiteMetadataCache(self._cache_path, str(self.directory)) if self.use_cache else None
         
-        # Find all model files
-        for root, _, files in os.walk(self.directory):
+        # Find all model files 
+        visited_dirs = set()
+        for root, dirs, files in os.walk(self.directory, followlinks=True):
+            
+            real_root = os.path.realpath(root)
+            if real_root in visited_dirs:
+                dirs[:] = []  
+                continue
+            visited_dirs.add(real_root)
+            
             for file in files:
                 if any(file.lower().endswith(ext) for ext in extensions):
                     self._model_files.append(Path(root) / file)
@@ -425,10 +483,12 @@ class DirectScanner:
             path_str = str(model_path)
             try:
                 stat = model_path.stat()
-                if self._cache and path_str in self._cache.entries:
-                    entry = self._cache.entries[path_str]
-                    if entry.mtime == stat.st_mtime and entry.size == stat.st_size:
-                        continue  # Will be a cache hit
+                if self._sqlite_cache:
+                    cached = self._sqlite_cache.get_entry(path_str)
+                    if cached:
+                        mtime, size, _ = cached
+                        if mtime == stat.st_mtime and size == stat.st_size:
+                            continue  # Will be a cache hit
             except OSError:
                 continue
             files_to_hash.append(model_path)
@@ -472,10 +532,8 @@ class DirectScanner:
                 if file_info:
                     self._local_files.append(file_info)
         
-        # Cleanup and save cache
+        # Cleanup stale cache entries
         self._cleanup_cache()
-        if self.use_cache:
-            self._save_cache()
         
         return self._local_files
     
@@ -490,24 +548,22 @@ class DirectScanner:
         except OSError:
             return None
         
-        # Check cache - if mtime and size match, trust the cached hash
-        if self._cache and path_str in self._cache.entries:
-            entry = self._cache.entries[path_str]
-            if entry.mtime == current_mtime and entry.size == current_size:
-                self._stats['cache_hits'] += 1
-                return entry.file_info
+        # Check SQLite cache
+        if self._sqlite_cache:
+            cached = self._sqlite_cache.get_entry(path_str)
+            if cached:
+                mtime, size, file_info = cached
+                if mtime == current_mtime and size == current_size and file_info:
+                    self._stats['cache_hits'] += 1
+                    return file_info
         
-        # Cache miss - need to hash the file
+        # Cache miss
         self._stats['cache_misses'] += 1
         file_info = self._hash_file(path)
         
-        # Store in cache
-        if self._cache and file_info:
-            self._cache.entries[path_str] = CacheEntry(
-                mtime=current_mtime,
-                size=current_size,
-                file_info=file_info
-            )
+        # Store in SQLite cache
+        if self._sqlite_cache and file_info:
+            self._sqlite_cache.set_entry(path_str, current_mtime, current_size, file_info)
         
         return file_info
     
@@ -531,37 +587,11 @@ class DirectScanner:
             self._stats['hash_errors'] += 1
             return None
     
-    def _load_cache(self) -> Optional[MetadataCache]:
-        """Load cache from disk."""
-        try:
-            if self._cache_path.exists():
-                with open(self._cache_path, 'rb') as f:
-                    cache = pickle.load(f)
-                if isinstance(cache, MetadataCache) and cache.version == self.CACHE_VERSION:
-                    if cache.directory == str(self.directory):
-                        return cache
-        except Exception:
-            pass
-        return MetadataCache(directory=str(self.directory), created=datetime.now().isoformat())
-    
-    def _save_cache(self):
-        """Save cache to disk."""
-        if not self._cache:
-            return
-        try:
-            with open(self._cache_path, 'wb') as f:
-                pickle.dump(self._cache, f)
-        except Exception:
-            pass
-    
     def _cleanup_cache(self):
         """Remove cache entries for deleted files."""
-        if not self._cache:
-            return
-        existing = {str(p) for p in self._model_files}
-        stale = [p for p in self._cache.entries if p not in existing]
-        for path in stale:
-            del self._cache.entries[path]
+        if self._sqlite_cache:
+            valid_paths = {str(p) for p in self._model_files}
+            self._sqlite_cache.cleanup_stale(valid_paths)
     
     def clear_cache(self):
         """Delete the cache file."""

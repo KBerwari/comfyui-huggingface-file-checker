@@ -74,6 +74,14 @@ The stats panel shows:
 
 ---
 
+## Updates (2025-12-30)
+
+- Switched local caching to SQLite (.hf_checker_cache.sqlite / .hf_checker_direct_cache.sqlite), we no longer read/write pickle files. You can safely remove old `.hf_checker_cache.pkl` files.
+
+- Symlink support: scanners follow symlinks. This is important for setups where models are stored on different drives but linked into a single directory (e.g., H:\ drive symlinks).
+
+- Moved main.py into root folder for easier access. Commands now run from root directory. I.e `python main.py ...` instead of `python src/main.py ...`
+
 ## Setup
 
 ```bash
@@ -102,10 +110,10 @@ pip install -r requirements.txt
 cd hf-file-checker
 
 # Add your model folders
-python src/main.py config --add "path/to/your/models"
+python main.py config --add "path/to/your/models"
 
 # Start server (keep running)
-python src/main.py server
+python main.py server
 ```
 
 Then install the Tampermonkey script:
@@ -123,7 +131,7 @@ Generate metadata JSON files using [ComfyUI-Lora-Manager](https://github.com/wil
 cd hf-file-checker
 
 # Basic check + safetensors-only + Export missing files and download URLs
-python src/main.py check --hf-url "https://huggingface.co/user/exampleloras/tree/main" --local-dir "path/to/your/loras" --safetensors-only --export-all "./results"
+python main.py check --hf-url "https://huggingface.co/user/exampleloras/tree/main" --local-dir "path/to/your/loras" --safetensors-only --export-all "./results"
 ```
 ## CLI Reference
 
@@ -131,38 +139,38 @@ python src/main.py check --hf-url "https://huggingface.co/user/exampleloras/tree
 
 ```bash
 # Using HuggingFace URL (auto-detects repo type)
-python src/main.py check --hf-url "https://huggingface.co/user/exampleloras/tree/main" --local-dir "path/to/your/loras"
+python main.py check --hf-url "https://huggingface.co/user/exampleloras/tree/main" --local-dir "path/to/your/loras"
 
 # Using repository ID
-python src/main.py check --hf-repo "user/exampleloras" --local-dir "path/to/your/loras"
+python main.py check --hf-repo "user/exampleloras" --local-dir "path/to/your/loras"
 
 # Using repo ID with explicit type
-python src/main.py check --hf-repo "username/my-dataset" --repo-type dataset --local-dir "./data"
+python main.py check --hf-repo "username/my-dataset" --repo-type dataset --local-dir "./data"
 
 # Export all results to a directory
-python src/main.py check --hf-repo "user/exampleloras" --local-dir "path/to/your/loras" --export-all "./results"
+python main.py check --hf-repo "user/exampleloras" --local-dir "path/to/your/loras" --export-all "./results"
 
 # Direct file scanning (no metadata needed)
-python src/main.py check --hf-repo "user/exampleloras" --local-dir "path/to/your/loras" --scan-files --safetensors-only
+python main.py check --hf-repo "user/exampleloras" --local-dir "path/to/your/loras" --scan-files --safetensors-only
 ```
 ### Options Examples
 
 ```bash
 # Check only safetensors files
-python src/main.py check --hf-repo "user/exampleloras" --local-dir "path/to/your/loras" --safetensors-only
+python main.py check --hf-repo "user/exampleloras" --local-dir "path/to/your/loras" --safetensors-only
 
 # Force re-scan (ignore cache)
-python src/main.py check --hf-repo "user/exampleloras" --local-dir "path/to/your/loras" --no-cache
+python main.py check --hf-repo "user/exampleloras" --local-dir "path/to/your/loras" --no-cache
 
 # Clear cache and run fresh
-python src/main.py check --hf-repo "user/exampleloras" --local-dir "path/to/your/loras" --clear-cache
+python main.py check --hf-repo "user/exampleloras" --local-dir "path/to/your/loras" --clear-cache
 
 # Using API token for private repos
-python src/main.py check --hf-repo "user/private-repo" --local-dir "path/to/your/metadata" --token "hf_xxxxx"
+python main.py check --hf-repo "user/private-repo" --local-dir "path/to/your/metadata" --token "hf_xxxxx"
 
 # Or set environment variable
 export HF_TOKEN="hf_xxxxx" # set for per session, for permanent add to system env vars
-python src/main.py check --hf-repo "user/private-repo" --local-dir "path/to/your/metadata"
+python main.py check --hf-repo "user/private-repo" --local-dir "path/to/your/metadata"
 ```
 
 ## CLI Options
@@ -216,10 +224,10 @@ The CLI provides a summary showing:
 ### Managing Directories
 
 ```bash
-python src/main.py config --add "H:/AI/models/loras"
-python src/main.py config --add "D:/models/checkpoints"
-python src/main.py config --list
-python src/main.py config --remove "path/to/remove"
+python main.py config --add "H:/AI/models/loras"
+python main.py config --add "D:/models/checkpoints"
+python main.py config --list
+python main.py config --remove "path/to/remove"
 ```
 ### Multiple Directories
 
@@ -230,9 +238,9 @@ All directories are scanned and indexed together. The browser extension will sho
 ### Server Options
 
 ```bash
-python src/main.py server              # Start on default port 7860
-python src/main.py server --port 8080  # Different port
-python src/main.py server --no-scan    # Skip initial scan
+python main.py server              # Start on default port 7860
+python main.py server --port 8080  # Different port
+python main.py server --no-scan    # Skip initial scan
 ```
 ### Server API Endpoints
 
@@ -271,7 +279,7 @@ Response includes:
 
 1. **Fetches HuggingFace Repository Files**: Uses the `huggingface_hub` library to get file metadata including SHA256 hashes (stored as LFS OID for large files). Supports model, dataset, and space repositories.
 
-2. **Scans Local Metadata**: Recursively scans your local directory for JSON files containing file metadata. Uses smart caching (stored in `.hf_checker_cache.pkl`) to speed up subsequent runs.
+2. **Scans Local Metadata**: Recursively scans your local directory for JSON files containing file metadata. Uses smart caching (stored in `.hf_checker_cache.sqlite`) to speed up subsequent runs.
 
 3. **Compares Files**: 
    - First tries to match by SHA256 hash (most reliable)
@@ -301,7 +309,7 @@ The tool will scan all `.json` files in the specified directory (recursively) an
    
 
 ## Caching
-The tool caches parsed metadata in a `.hf_checker_cache.pkl` file in your local directory. This significantly speeds up subsequent runs when scanning large collections (e.g., 5000+ files).
+The tool caches parsed metadata in a `.hf_checker_cache.sqlite` file in your local directory. This significantly speeds up subsequent runs when scanning large collections (e.g., 5000+ files).
 
 - Cache validates by file modification time and size
 - Use `--no-cache` to bypass cache for a single run
@@ -310,8 +318,8 @@ The tool caches parsed metadata in a `.hf_checker_cache.pkl` file in your local 
 
 
 Both modes cache results so subsequent runs are fast:
-- Metadata mode: `.hf_checker_cache.pkl`
-- Direct scan mode: `.hf_checker_direct_cache.pkl`
+- Metadata mode: `.hf_checker_cache.sqlite`
+- Direct scan mode: `.hf_checker_direct_cache.sqlite`
 
 Cache invalidates automatically when files change (checks mtime + size).
 

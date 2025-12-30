@@ -8,7 +8,8 @@ import sys
 import os
 
 # Add src directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src'))
+# sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import click
 import fnmatch
@@ -523,8 +524,8 @@ def config(list_dirs, add_dir, remove_dir, mode, show_path):
     
     \b
     Scan modes:
-      metadata - Read SHA256 from JSON metadata files (fast, needs ComfyUI-Lora-Manager)
-      files    - Hash actual model files (slower first run, but works without metadata)
+      metadata - Read SHA256 from JSON metadata files (fast)
+      files    - Hash actual model files (slower first run, but caches results)
     
     \b
     Examples:
@@ -559,6 +560,8 @@ def config(list_dirs, add_dir, remove_dir, mode, show_path):
         return
     
     # Default: list directories
+    console.print("\n[bold]Configuration[/bold]\n")
+    
     dirs = config_manager.config.directories
     if not dirs:
         console.print("[dim]No directories configured.[/dim]")

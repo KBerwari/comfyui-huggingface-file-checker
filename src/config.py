@@ -59,7 +59,7 @@ class Config:
     """Main configuration."""
     directories: List[DirectoryConfig] = field(default_factory=list)
     server: ServerConfig = field(default_factory=ServerConfig)
-    version: int = 1
+    version: int = 2 
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
